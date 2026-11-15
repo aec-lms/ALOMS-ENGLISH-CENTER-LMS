@@ -1,0 +1,61 @@
+-- Persistent, branch-scoped physical library inventory and auditable book loans.
+CREATE TABLE IF NOT EXISTS library_books (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  branch_id BIGINT UNSIGNED NOT NULL,
+  isbn VARCHAR(32) NULL,
+  title VARCHAR(180) NOT NULL,
+  author VARCHAR(160) NOT NULL DEFAULT '',
+  category VARCHAR(120) NOT NULL DEFAULT '',
+  publisher VARCHAR(160) NULL,
+  publication_year SMALLINT UNSIGNED NULL,
+  shelf_location VARCHAR(80) NOT NULL DEFAULT '',
+  total_copies SMALLINT UNSIGNED NOT NULL,
+  available_copies SMALLINT UNSIGNED NOT NULL,
+  daily_fine DECIMAL(8,2) NOT NULL DEFAULT 0.00,
+  is_active TINYINT(1) NOT NULL DEFAULT 1,
+  created_by BIGINT UNSIGNED NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NULL,
+  UNIQUE KEY uq_library_branch_isbn (branch_id, isbn),
+  INDEX idx_library_branch_active_title (branch_id, is_active, title),
+  CONSTRAINT fk_library_book_branch FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_library_book_creator FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT,
+  CONSTRAINT chk_library_book_copies CHECK (total_copies > 0 AND available_copies <= total_copies),
+  CONSTRAINT chk_library_daily_fine CHECK (daily_fine >= 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS library_book_loans (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  book_id BIGINT UNSIGNED NOT NULL,
+  branch_id BIGINT UNSIGNED NOT NULL,
+  student_user_id BIGINT UNSIGNED NOT NULL,
+  issued_by BIGINT UNSIGNED NOT NULL,
+  returned_by BIGINT UNSIGNED NULL,
+  issued_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  due_date DATE NOT NULL,
+  returned_at DATETIME NULL,
+  daily_fine_snapshot DECIMAL(8,2) NOT NULL DEFAULT 0.00,
+  fine_amount DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+  status ENUM('issued','returned','lost') NOT NULL DEFAULT 'issued',
+  remarks VARCHAR(500) NULL,
+  INDEX idx_library_loans_branch_status (branch_id, status, due_date),
+  INDEX idx_library_loans_student_status (student_user_id, status, issued_at),
+  INDEX idx_library_loans_book_status (book_id, status),
+  CONSTRAINT fk_library_loan_book FOREIGN KEY (book_id) REFERENCES library_books(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_library_loan_branch FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_library_loan_student FOREIGN KEY (student_user_id) REFERENCES users(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_library_loan_issuer FOREIGN KEY (issued_by) REFERENCES users(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_library_loan_returner FOREIGN KEY (returned_by) REFERENCES users(id) ON DELETE RESTRICT,
+  CONSTRAINT chk_library_loan_fines CHECK (daily_fine_snapshot >= 0 AND fine_amount >= 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+INSERT IGNORE INTO role_permissions (role, permission_key, allowed) VALUES
+('super_admin', 'library.manage', 1),
+('admin', 'library.manage', 1),
+('branch_manager', 'library.manage', 1),
+('teacher', 'library.manage', 0),
+('assistant_teacher', 'library.manage', 0),
+('accountant', 'library.manage', 0),
+('student', 'library.manage', 0),
+('guardian', 'library.manage', 0),
+('support_staff', 'library.manage', 1);

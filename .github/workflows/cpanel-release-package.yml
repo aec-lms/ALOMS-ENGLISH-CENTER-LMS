@@ -1,0 +1,76 @@
+name: cPanel release package verification
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/cpanel-release-package.yml'
+      - 'scripts/build-release-package.sh'
+      - 'scripts/verify-release-package.sh'
+      - 'scripts/install.php'
+      - 'scripts/diagnose.php'
+      - 'docs/SUPPORT-DIAGNOSTICS-RECOVERY.md'
+      - 'api/_config.php'
+      - 'docs/CPANEL-DEPLOYMENT.md'
+      - 'docs/CPANEL-BACKUP-RESTORE.md'
+      - 'api/**'
+      - 'database/**'
+      - 'public/**'
+      - 'src/**'
+      - 'package.json'
+      - 'bun.lock'
+      - 'vite.config.ts'
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version (for example, 1.0.0-rc1)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Build and verify cPanel ZIP
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out exact release commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 1
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: latest
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - name: Build, lint and verify release package
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            VERSION="$RELEASE_VERSION"
+            export REQUIRE_CPANEL_GATES=true
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            export REQUIRE_CPANEL_GATES=true
+          else
+            VERSION="ci-${GITHUB_SHA:0:12}"
+            export REQUIRE_CPANEL_GATES=false
+          fi
+          bash -n scripts/build-release-package.sh scripts/verify-release-package.sh
+          bash scripts/build-release-package.sh "$VERSION"
+      - name: Upload verified ZIP and SHA-256 sidecar
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: aec-lms-cpanel-release-${{ github.ref_name }}
+          path: release-artifacts/
+          if-no-files-found: error
+          retention-days: 30

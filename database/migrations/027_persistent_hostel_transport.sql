@@ -1,0 +1,103 @@
+-- Persistent branch-scoped hostel rooms/allocations and transport routes/pass assignments.
+CREATE TABLE IF NOT EXISTS transport_routes (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  branch_id BIGINT UNSIGNED NOT NULL,
+  route_name VARCHAR(160) NOT NULL,
+  route_name_bn VARCHAR(160) NULL,
+  vehicle_number VARCHAR(40) NOT NULL,
+  driver_name VARCHAR(160) NOT NULL,
+  driver_phone VARCHAR(32) NOT NULL,
+  monthly_fee DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+  capacity SMALLINT UNSIGNED NOT NULL,
+  stops JSON NOT NULL,
+  is_active TINYINT(1) NOT NULL DEFAULT 1,
+  created_by BIGINT UNSIGNED NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NULL,
+  UNIQUE KEY uq_transport_branch_vehicle (branch_id, vehicle_number),
+  INDEX idx_transport_branch_active (branch_id, is_active, route_name),
+  CONSTRAINT fk_transport_route_branch FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_transport_route_creator FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT,
+  CONSTRAINT chk_transport_capacity CHECK (capacity > 0),
+  CONSTRAINT chk_transport_fee CHECK (monthly_fee >= 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS transport_assignments (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  route_id BIGINT UNSIGNED NOT NULL,
+  branch_id BIGINT UNSIGNED NOT NULL,
+  student_user_id BIGINT UNSIGNED NOT NULL,
+  assigned_by BIGINT UNSIGNED NOT NULL,
+  status ENUM('active','ended') NOT NULL DEFAULT 'active',
+  active_student_id BIGINT UNSIGNED GENERATED ALWAYS AS (IF(status = 'active', student_user_id, NULL)) STORED,
+  start_date DATE NOT NULL,
+  end_date DATE NULL,
+  monthly_fee_snapshot DECIMAL(10,2) NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NULL,
+  UNIQUE KEY uq_transport_active_student (active_student_id),
+  INDEX idx_transport_assignment_route (route_id, status),
+  INDEX idx_transport_assignment_student (student_user_id, status),
+  CONSTRAINT fk_transport_assignment_route FOREIGN KEY (route_id) REFERENCES transport_routes(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_transport_assignment_branch FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_transport_assignment_student FOREIGN KEY (student_user_id) REFERENCES users(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_transport_assignment_actor FOREIGN KEY (assigned_by) REFERENCES users(id) ON DELETE RESTRICT,
+  CONSTRAINT chk_transport_assignment_fee CHECK (monthly_fee_snapshot >= 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS hostel_rooms (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  branch_id BIGINT UNSIGNED NOT NULL,
+  building_name VARCHAR(160) NOT NULL,
+  room_number VARCHAR(40) NOT NULL,
+  room_type ENUM('single','double','dormitory') NOT NULL DEFAULT 'double',
+  monthly_rent DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+  capacity SMALLINT UNSIGNED NOT NULL,
+  amenities JSON NULL,
+  warden_name VARCHAR(160) NULL,
+  warden_phone VARCHAR(32) NULL,
+  is_active TINYINT(1) NOT NULL DEFAULT 1,
+  created_by BIGINT UNSIGNED NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NULL,
+  UNIQUE KEY uq_hostel_branch_room (branch_id, building_name, room_number),
+  INDEX idx_hostel_branch_active (branch_id, is_active, building_name, room_number),
+  CONSTRAINT fk_hostel_room_branch FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_hostel_room_creator FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT,
+  CONSTRAINT chk_hostel_room_capacity CHECK (capacity > 0),
+  CONSTRAINT chk_hostel_room_rent CHECK (monthly_rent >= 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS hostel_allocations (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  room_id BIGINT UNSIGNED NOT NULL,
+  branch_id BIGINT UNSIGNED NOT NULL,
+  student_user_id BIGINT UNSIGNED NOT NULL,
+  allocated_by BIGINT UNSIGNED NOT NULL,
+  status ENUM('active','vacated') NOT NULL DEFAULT 'active',
+  active_student_id BIGINT UNSIGNED GENERATED ALWAYS AS (IF(status = 'active', student_user_id, NULL)) STORED,
+  start_date DATE NOT NULL,
+  end_date DATE NULL,
+  monthly_rent_snapshot DECIMAL(10,2) NOT NULL,
+  remarks VARCHAR(500) NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NULL,
+  UNIQUE KEY uq_hostel_active_student (active_student_id),
+  INDEX idx_hostel_allocation_room (room_id, status),
+  INDEX idx_hostel_allocation_student (student_user_id, status),
+  CONSTRAINT fk_hostel_allocation_room FOREIGN KEY (room_id) REFERENCES hostel_rooms(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_hostel_allocation_branch FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_hostel_allocation_student FOREIGN KEY (student_user_id) REFERENCES users(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_hostel_allocation_actor FOREIGN KEY (allocated_by) REFERENCES users(id) ON DELETE RESTRICT,
+  CONSTRAINT chk_hostel_allocation_rent CHECK (monthly_rent_snapshot >= 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+INSERT IGNORE INTO role_permissions (role, permission_key, allowed) VALUES
+('super_admin', 'transport.manage', 1), ('admin', 'transport.manage', 1),
+('branch_manager', 'transport.manage', 1), ('support_staff', 'transport.manage', 1),
+('teacher', 'transport.manage', 0), ('assistant_teacher', 'transport.manage', 0),
+('accountant', 'transport.manage', 0), ('student', 'transport.manage', 0), ('guardian', 'transport.manage', 0),
+('super_admin', 'hostel.manage', 1), ('admin', 'hostel.manage', 1),
+('branch_manager', 'hostel.manage', 1), ('support_staff', 'hostel.manage', 1),
+('teacher', 'hostel.manage', 0), ('assistant_teacher', 'hostel.manage', 0),
+('accountant', 'hostel.manage', 0), ('student', 'hostel.manage', 0), ('guardian', 'hostel.manage', 0);

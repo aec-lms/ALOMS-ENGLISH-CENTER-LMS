@@ -1,0 +1,275 @@
+name: Product foundation checks
+
+on:
+  pull_request:
+    branches: [main, 'feature/**', 'release/portable-integration']
+  push:
+    branches: [main, custom/product-foundation, backend/php-api-foundation, ci/robust-migration-safety-check, test/mysql-migration-integration, 'release/portable-integration', 'codex/full-lms-completion']
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    name: Frontend install, type-check and production build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: latest
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+      - name: Type-check
+        run: bun run lint
+      - name: Build production frontend
+        run: |
+          bun run build
+          test -f dist/index.html
+          test -f dist/.htaccess
+
+  backend:
+    name: PHP 8.3 syntax and migration validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.3'
+          extensions: pdo_mysql, mbstring, zip, zlib
+          coverage: none
+      - name: Lint PHP source
+        run: |
+          find api scripts -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l
+      - name: Check migration safety
+        run: php scripts/check-migration-safety.php
+
+  mysql-integration:
+    name: MySQL migrations and schema integration
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: test-root-password
+          MYSQL_DATABASE: aec_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -ptest-root-password"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up PHP 8.3 with MySQL driver
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.3'
+          extensions: pdo_mysql, mbstring, zip
+          coverage: none
+      - name: Install encrypted backup CLI tools
+        run: sudo apt-get update && sudo apt-get install -y default-mysql-client gnupg
+      - name: Run deployment preflight against disposable MySQL
+        env:
+          AEC_DB_HOST: 127.0.0.1
+          AEC_DB_PORT: 3306
+          AEC_DB_NAME: aec_test
+          AEC_DB_USER: root
+          AEC_DB_PASS: test-root-password
+          AEC_APP_URL: https://example.test
+          AEC_MAIL_FROM: lms@example.test
+          AEC_PRIVATE_STORAGE_DIR: ${{ github.workspace }}/../aec-private-storage
+          AEC_DOCUMENT_ROOT: ${{ github.workspace }}
+          AEC_BACKUP_DIR: ${{ github.workspace }}/../aec-backup-preflight
+          AEC_BACKUP_PASSPHRASE: test-backup-passphrase-32-characters-minimum
+          AEC_MAIL_ENCRYPTION_KEY: YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=
+        run: php scripts/preflight.php
+      - name: Apply migrations and verify database schema
+        env:
+          AEC_TEST_DB_HOST: 127.0.0.1
+          AEC_TEST_DB_PORT: 3306
+          AEC_TEST_DB_NAME: aec_test
+          AEC_TEST_DB_USER: root
+          AEC_TEST_DB_PASS: test-root-password
+        run: php scripts/test-mysql-migrations.php
+      - name: Rehearse encrypted database and private-storage backup/restore
+        env:
+          AEC_DB_HOST: 127.0.0.1
+          AEC_DB_PORT: 3306
+          AEC_DB_NAME: aec_test
+          AEC_DB_USER: root
+          AEC_DB_PASS: test-root-password
+        run: php scripts/test-backup-restore.php
+      - name: Exercise one-time fresh installer and permanent lock
+        run: |
+          set -euo pipefail
+          php -r '$db = new PDO("mysql:host=127.0.0.1;port=3306;charset=utf8mb4", "root", "test-root-password", [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]); $db->exec("CREATE DATABASE aec_installer_test CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");'
+          TEST_HOME="$(mktemp -d)"
+          PRIVATE_DIR="${GITHUB_WORKSPACE}/../aec-installer-private"
+          trap 'rm -rf "$TEST_HOME" "$PRIVATE_DIR"' EXIT
+          mkdir -p "$PRIVATE_DIR"
+          export HOME="$TEST_HOME"
+          export AEC_DOCUMENT_ROOT="$GITHUB_WORKSPACE"
+          printf '127.0.0.1\naec_installer_test\nroot\ntest-root-password\n3306\nhttps://installer.example.test\nlms@example.test\n%s\nCI Installer Admin\ninstaller@example.test\nStrongTestPassword123!\nStrongTestPassword123!\n' "$PRIVATE_DIR" | php scripts/install.php
+          test -s "$HOME/.aec-lms/config.php"
+          test -s "$HOME/.aec-lms/installation.json"
+          php -r '$c = require getenv("HOME") . "/.aec-lms/config.php"; $k = base64_decode((string)($c["AEC_MAIL_ENCRYPTION_KEY"] ?? ""), true); if (!is_string($k) || strlen($k) !== 32) { fwrite(STDERR, "Installer did not generate a 32-byte email outbox key.\\n"); exit(1); }'
+          test "$(stat -c '%a' "$HOME/.aec-lms")" = "700"
+          test "$(stat -c '%a' "$HOME/.aec-lms/config.php")" = "600"
+          php scripts/migrate.php --status
+          php scripts/diagnose.php --json > "$TEST_HOME/support-diagnostics.json"
+          php -r '$r = json_decode(file_get_contents(getenv("HOME") . "/support-diagnostics.json"), true, 512, JSON_THROW_ON_ERROR); if (($r["summary"]["fail"] ?? 1) !== 0) { fwrite(STDERR, "Support diagnostics reported failures.\n"); exit(1); } if (str_contains(file_get_contents(getenv("HOME") . "/support-diagnostics.json"), "test-root-password")) { fwrite(STDERR, "Support diagnostics leaked a test secret.\n"); exit(1); }'
+          php -r '$db = new PDO("mysql:host=127.0.0.1;port=3306;dbname=aec_installer_test;charset=utf8mb4", "root", "test-root-password", [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]); $count = (int)$db->query("SELECT COUNT(*) FROM users WHERE role = 0x61646d696e")->fetchColumn(); if ($count !== 1) { fwrite(STDERR, "Expected exactly one installer-created Admin; got {$count}.\n"); exit(1); }'
+          if php scripts/install.php </dev/null; then
+            echo "Installer unexpectedly allowed a second run."
+            exit 1
+          fi
+      - name: Verify one-time first-admin bootstrap
+        env:
+          AEC_DB_HOST: 127.0.0.1
+          AEC_DB_PORT: 3306
+          AEC_DB_NAME: aec_test
+          AEC_DB_USER: root
+          AEC_DB_PASS: test-root-password
+        run: |
+          set -euo pipefail
+          printf 'CI Bootstrap Admin\nbootstrap@example.test\nStrongTestPassword123!\nStrongTestPassword123!\n' | php scripts/create-admin.php
+          if php scripts/create-admin.php </dev/null; then
+            echo "Bootstrap unexpectedly allowed a second administrator."
+            exit 1
+          fi
+          php -r '$db = new PDO("mysql:host=127.0.0.1;port=3306;dbname=aec_test;charset=utf8mb4", "root", "test-root-password", [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]); $count = (int)$db->query("SELECT COUNT(*) FROM users WHERE role = 0x61646d696e")->fetchColumn(); if ($count !== 1) { fwrite(STDERR, "Expected exactly one administrator; got {$count}.\n"); exit(1); } echo "Exactly one administrator exists after repeated bootstrap attempt.\n";'
+      - name: Run PHP API HTTP integration tests
+        env:
+          AEC_TEST_DB_HOST: 127.0.0.1
+          AEC_TEST_DB_PORT: 3306
+          AEC_TEST_DB_NAME: aec_test
+          AEC_TEST_DB_USER: root
+          AEC_TEST_DB_PASS: test-root-password
+          AEC_DB_HOST: 127.0.0.1
+          AEC_DB_PORT: 3306
+          AEC_DB_NAME: aec_test
+          AEC_DB_USER: root
+          AEC_DB_PASS: test-root-password
+        run: |
+          php scripts/test-php-api-integration.php
+          php scripts/test-account-lifecycle.php
+          php scripts/test-email-outbox.php
+
+  browser-e2e:
+    name: Chromium LMS critical workflow journeys
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: test-root-password
+          MYSQL_DATABASE: aec_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -ptest-root-password"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    env:
+      AEC_DB_HOST: 127.0.0.1
+      AEC_DB_PORT: 3306
+      AEC_DB_NAME: aec_test
+      AEC_DB_USER: root
+      AEC_DB_PASS: test-root-password
+      AEC_TEST_DB_HOST: 127.0.0.1
+      AEC_TEST_DB_PORT: 3306
+      AEC_TEST_DB_NAME: aec_test
+      AEC_TEST_DB_USER: root
+      AEC_TEST_DB_PASS: test-root-password
+      AEC_APP_URL: https://example.test
+      AEC_MAIL_FROM: lms@example.test
+      AEC_PRIVATE_STORAGE_DIR: ${{ github.workspace }}/../aec-e2e-private
+      AEC_DOCUMENT_ROOT: ${{ github.workspace }}
+      AEC_BACKUP_DIR: ${{ github.workspace }}/../aec-e2e-backups
+      AEC_BACKUP_PASSPHRASE: test-backup-passphrase-32-characters-minimum
+      AEC_MAIL_ENCRYPTION_KEY: YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=
+      E2E_FIXTURE_FILE: ${{ github.workspace }}/../aec-e2e-fixtures.json
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install encrypted backup CLI tools
+        run: sudo apt-get update && sudo apt-get install -y default-mysql-client gnupg
+      - name: Set up PHP 8.3 with MySQL driver
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.3'
+          extensions: pdo_mysql, mbstring, zip
+          coverage: none
+      - name: Run deployment preflight against disposable MySQL
+        run: php scripts/preflight.php
+      - name: Apply and validate the complete migration set
+        run: php scripts/test-mysql-migrations.php
+      - name: Seed isolated browser workflow fixtures
+        run: php scripts/seed-browser-e2e.php > "$E2E_FIXTURE_FILE"
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: latest
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Install locked application dependencies
+        run: bun install --frozen-lockfile
+      - name: Install pinned Playwright test runner
+        run: npm install --no-save --package-lock=false --ignore-scripts --legacy-peer-deps @playwright/test@1.56.1
+      - name: Type-check application
+        run: bun run lint
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Run API-backed LMS browser journeys
+        run: npx playwright test
+      - name: Upload Playwright diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: playwright-e2e-diagnostics
+          path: |
+            test-results/
+            playwright-report/
+          if-no-files-found: ignore
+          retention-days: 7
+  apache-access-controls:
+    name: Apache protected-path HTTP denial
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install and configure Apache with overrides enabled
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y apache2 curl
+          sudo a2enmod rewrite headers
+          sudo sed -i '/<Directory \/var\/www\/>/,/<\/Directory>/ s/AllowOverride None/AllowOverride All/' /etc/apache2/apache2.conf
+          sudo mkdir -p /var/www/html/api /var/www/html/scripts /var/www/html/database/migrations /var/www/html/docs /var/www/aec-private-storage
+          sudo cp .htaccess index.html /var/www/html/
+          sudo cp api/.htaccess /var/www/html/api/
+          sudo cp scripts/.htaccess /var/www/html/scripts/
+          sudo touch /var/www/html/api/_bootstrap.php /var/www/html/api/_email.php /var/www/html/api/README.md
+          sudo touch /var/www/html/scripts/install.php /var/www/html/database/migrations/001_core_schema.sql
+          sudo cp docs/CPANEL-DEPLOYMENT.md /var/www/html/docs/
+          sudo touch /var/www/html/.env.example
+          printf 'private media must never be served over HTTP\n' | sudo tee /var/www/aec-private-storage/http-denial-probe.txt >/dev/null
+          sudo apache2ctl configtest
+          sudo systemctl start apache2
+      - name: Verify protected paths are denied by Apache
+        run: bash scripts/test-apache-access-controls.sh

@@ -1,0 +1,78 @@
+name: AEC LMS Laravel CI
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'laravel/**'
+      - '.github/workflows/laravel-ci.yml'
+  pull_request:
+    paths:
+      - 'laravel/**'
+      - '.github/workflows/laravel-ci.yml'
+
+jobs:
+  laravel-tests:
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: rootpassword
+          MYSQL_DATABASE: aec_lms_ci
+        ports:
+          - 3306:3306
+        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=5
+
+    defaults:
+      run:
+        working-directory: laravel
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP 8.3
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, openssl, pdo, pdo_mysql, pdo_sqlite, zip, fileinfo
+          coverage: none
+
+      - name: Validate composer.json
+        run: composer validate --strict
+
+      - name: Install Composer dependencies
+        run: composer install --prefer-dist --no-interaction --no-progress
+
+      - name: PHP Syntax Lint across app, plugins, routes, tests
+        run: find app bootstrap config database plugins routes tests -name '*.php' -exec php -l {} +
+
+      - name: Prepare CI environment file
+        run: |
+          cp .env.example .env
+          php artisan key:generate --force
+
+      - name: Verify Artisan CLI, Routes & Migrations (Pretend)
+        run: |
+          php artisan optimize:clear
+          php artisan route:list
+          php artisan migrate --pretend --database=sqlite
+
+      - name: Execute PHPUnit Test Suite
+        run: php artisan test --colors=always
+
+      - name: Verify Fresh Installer on Empty MySQL 8.4 Database
+        env:
+          DB_CONNECTION: mysql
+          DB_HOST: 127.0.0.1
+          DB_PORT: 3306
+          DB_DATABASE: aec_lms_ci
+          DB_USERNAME: root
+          DB_PASSWORD: rootpassword
+        run: |
+          php artisan aec:install-fresh \
+            --name="CI Administrator" \
+            --email="ci-admin@aec.test" \
+            --password="CiStrongPassword!2026"
+          php artisan aec:sync-plugins
